@@ -1,0 +1,78 @@
+stages:
+  - Lint
+  - Build
+  - Test
+  - Quality
+  - Deploy
+
+variables:
+  POSTGRES_DB: "postgres"
+  POSTGRES_USER: "postgres"
+  POSTGRES_PASSWORD: "postgres"
+
+# JOBS
+
+build bookster:
+  stage: Build
+  image: ${CI_DEPENDENCY_PROXY_GROUP_IMAGE_PREFIX}/node:18
+  script:
+    - echo "//registry.npmjs.org/:_authToken=${NPM_TOKEN}">> .npmrc
+    - npm ci
+    - npm run build
+
+lint bookster:
+  stage: Lint
+  image: ${CI_DEPENDENCY_PROXY_GROUP_IMAGE_PREFIX}/node:18
+  script:
+    - echo "//registry.npmjs.org/:_authToken=${NPM_TOKEN}">> .npmrc
+    - npm ci
+    - npm run lint
+
+test bookster:
+  stage: Test
+  image: ${CI_DEPENDENCY_PROXY_GROUP_IMAGE_PREFIX}/node:18
+  services:
+    - postgres:11
+  script:
+    - echo "//registry.npmjs.org/:_authToken=${NPM_TOKEN}">> .npmrc
+    - npm ci
+    - cp ./setup/.env.ci ./setup/.env.test
+    - npm run test
+  artifacts:
+    paths:
+      - ./coverage
+    when: always
+    reports:
+      junit:
+        - ./coverage/junit.xml
+
+sonarqube:
+  stage: Quality
+  image:
+    name: ${CI_DEPENDENCY_PROXY_GROUP_IMAGE_PREFIX}/sonarsource/sonar-scanner-cli:${SONAR_IMAGE_TAG}
+  variables:
+    SONAR_USER_HOME: "${CI_PROJECT_DIR}/.sonar" # Defines the location of the analysis task cache
+    GIT_DEPTH: "0" # Tells git to fetch all the branches of the project, required by the analysis task
+  cache:
+    key: "${CI_JOB_NAME}"
+    paths:
+      - .sonar/cache
+  script:
+    - sonar-scanner -Dsonar.projectVersion=${CI_COMMIT_TAG:-${CI_COMMIT_SHORT_SHA}} -Dsonar.host.url=$SONAR_HOST_URL -Dsonar.login=$SONAR_LOGIN
+  allow_failure: true
+
+# Build Phase
+# Use kaniko executor image to build the docker image on GitLab Runner
+
+build tag bookster:
+  stage: Deploy
+  image:
+    name: gcr.io/kaniko-project/executor:debug
+    entrypoint: [""]
+  rules:
+    - if: $CI_COMMIT_TAG =~ /^Bookster.*/
+  script:
+    - echo "//registry.npmjs.org/:_authToken=${NPM_TOKEN}">> .npmrc
+    - mkdir -p /kaniko/.docker
+    - echo "{\"auths\":{\"${CI_REGISTRY}\":{\"auth\":\"$(printf "%s:%s" "${CI_REGISTRY_USER}" "${CI_REGISTRY_PASSWORD}" | base64 | tr -d '\n')\"},\"$CI_DEPENDENCY_PROXY_SERVER\":{\"auth\":\"$(printf "%s:%s" ${CI_DEPENDENCY_PROXY_USER} "${CI_DEPENDENCY_PROXY_PASSWORD}" | base64 | tr -d '\n')\"}}}" > /kaniko/.docker/config.json
+    - /kaniko/executor --context $CI_PROJECT_DIR --dockerfile $CI_PROJECT_DIR/Dockerfile --destination $CI_REGISTRY_IMAGE:$CI_COMMIT_REF_NAME --build-arg "CI_DEPENDENCY_PROXY_GROUP_IMAGE_PREFIX=${CI_DEPENDENCY_PROXY_GROUP_IMAGE_PREFIX}"
